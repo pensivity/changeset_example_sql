@@ -8,8 +8,8 @@
 		Note: the table [Sandbox_PlaceIndex].[Final_PlaceIndex].[Scenario_Lookup] is expected to be updated manually, separate to this process, but should be up to date as well as this table.
 
 		Author: Cambell Ritchie
-		Last Modified Date: 04/04/2025
-		Latest update message: Added Logging and introduced best practice and batching for insert/update section.
+		Last Modified Date: 25/06/2025
+		Latest update message: Cleaned comments, added new section for RS5, added debug instructions.
 ******/
 
 
