@@ -15,18 +15,10 @@
 
 /* -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 	PLAN:
-		1. Find changesets.
-		2. Add appropriate effective start and end dates? Probably not
-		3. Add appropriate systems start and end dates
-		4. Update table
-		5. Profit??
+		1. Find changesets for dwellings, dwelling-building relationships, and dwelling-part of building relationships.
+		2. Add appropriate systems start and end dates.
+		3. Update tables with end dates, then insert any new records.
 
-	Questions:
-	-	Do the records on the old versions of the database need updating regardless of whether things change?
-		e.g. if in v0.1 a building 1 is linked to a dwelling 1, and in v0.2 building 1 is still linked to dwelling 1
-		I think the answer is no but should confirm.
-	-	How much should the date system be worked through to accommodate the final design?  Especially if there's a 
-		function in Databricks that already does it for us. Ask System Architects.
 
 	Further detail:
 	INSERTs:
@@ -35,25 +27,29 @@
 	-	New system start date, no system end date. Effective dates stay as-is.
 
 	DELETEs:
-	-	Check date stuff with architects. Confusing.
-	-	System end dates??? Could say yes, or just fill in sys_deleted_ind instead.
-	-	Effective end dates? Of dwelling. Do they need updating? Probably not, it should be system dates.
+	-	Put effective end date on existing record.
+	-	Put system end date on record.
+	-	Set sys_deleted_ind = Y.
 
 	UPDATEs:
-	-	Combo of INSERTs and DELETEs.
-	-	Anything else to consider here? E.g. system dates. Do new records need to be inserted for the "old" records?
+	-	Combo of INSERTs and DELETEs, except sys_deleted_ind = N for the delete section.
+
+	Buildings vs Part of Buildings (in relation to dwellings):
+	As long as a dwelling is linked to a part of a building, it cannot be linked to a building. The inverse is also true. However, the interim dwelling list always has something in the 
+	building_id column. This means the part_of_building column needs to be checked first before creating dwelling-building links.
 
 
 	Potential Improvements:
-	-	Automate the version/scenario options (e.g. pick all scenarios with latest version)
-	-	Add a setting for FULL dwelling set vs changeset to allow for changesets to be processed
+	-	Automate the version/scenario options (e.g. pick all scenarios with latest version). Partly done but could be done better.
+	-	Add a setting for FULL dwelling set vs changeset to allow for changesets to be processed (not relevant for proof of concept)
 			This would change the way the inserts, updates, and deletes are found.
 			May need to consider adding a column to the interim table for the type of change (so deletes are also included).
 	-	could try something like the below instead of complex joins:
 			SELECT ID from SKINNY where ID not IN
 				(SELECT ID from #temp_dwell)
 		not very easy with composite keys (ID + date)
-	-	Could use BETWEEN for dates
+		NOTE: decided not to use for proof of concept.
+	-	Could use BETWEEN for dates (won't be done in proof of concept).
 */ -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 
@@ -75,7 +71,7 @@
 
 
 
-
+	If wanting to debug the code, search this script for the DEBUG lines and uncomment the SQL statement(s) following them.
 
 	If wanting to run a test on the code, search this program for TEST SECTION and uncomment the lines following them, then follow the steps below, each with the following parameters.
 	Note that rerunning the same data should get no changes to the output tables (you can test this by rerunning step 1).
@@ -156,6 +152,10 @@
 			  FROM [Sandbox_PlaceIndex].[Processing_PlaceIndex].[Dwelling_Part_of_Building_Reference]
 			  where part_of_building_id like 'tst%'
 
+			DELETE
+			FROM [Sandbox_PlaceIndex].[Processing_PlaceIndex].[Table_Changelog]
+			WHERE change_date > DATEADD(HOUR, -2, GETDATE())
+
 */ -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 
@@ -164,20 +164,20 @@
 	Setting up variables
 ------------------------------------------------------------------------------------------------------------------------------------------------ */
 
-DECLARE @version_number		FLOAT = 0.4;
+DECLARE @version_number		FLOAT = 0.54;
 DECLARE @sys_create_date	DATETIME2(0);	-- E.g. = '2023-07-24 21:46:59.000', or leave blank for max date;
 DECLARE @sys_end_date		DATETIME2(0) = GETDATE();	-- so any end dates get added with the same time on them.
 
 -- Choose specific scenario numbers to run on if needed.
 DECLARE @scenario_number TABLE (id INT); 
---INSERT @scenario_number(id) VALUES(0);		-- Uncomment this line if you want to choose specific scenarios, e.g. INSERT @scenario_number(id) VALUES(0), (1), (2);
+--INSERT @scenario_number(id) VALUES(5);		-- Uncomment this line if you want to choose specific scenarios, e.g. INSERT @scenario_number(id) VALUES(0), (1), (2);
 
 -- This automatically selects all scenario numbers available for the chosen version if no scenarios are specified above
 IF NOT EXISTS(SELECT 1 FROM @scenario_number)
 	INSERT INTO @scenario_number
 	SELECT DISTINCT(scenario_no) FROM [Sandbox_PlaceIndex].[Processing_PlaceIndex].[Dwelling_List_Interim]
 	WHERE version_no = @version_number
-	AND scenario_no <> 999
+	AND scenario_no <> 999 -- These are no longer valid dwellings for the Dwelling Register
 
 	
 
@@ -196,7 +196,7 @@ SELECT @sys_create_date = ISNULL(@sys_create_date, MAX( [sys_create_date]) )
 IF OBJECT_ID('tempdb..#temp_dwell') IS NOT NULL
     DROP TABLE #temp_dwell
 
-
+-- Select dwellings data from the interim list
 SELECT --TOP (1000) 
 	   [dwelling_id]
       ,[scenario_no]
@@ -210,10 +210,20 @@ SELECT --TOP (1000)
       ,'N' AS [sys_deleted_ind]
   INTO #temp_dwell
   FROM [Sandbox_PlaceIndex].[Processing_PlaceIndex].[Dwelling_List_Interim]
-  WHERE scenario_no IN (SELECT id FROM @scenario_number)
+  WHERE scenario_no IN (SELECT id FROM @scenario_number WHERE id <> 5)
   AND version_no = @version_number
-  --AND sys_create_date = @sys_create_date -- DO WE WANT >= ? I think not, as that allows for more specificity in what we grab.
-  --AND (sys_end_date IS NULL OR sys_end_date > '4999-01-01')
+
+UNION
+-- Get the ruleset 5 stuff separately, since there are multiple records for each dwelling (due to uncertainty of which building to link to)
+SELECT dwelling_id, scenario_no, version_no, 0 AS building_id, part_of_building_id, 
+		effective_start_date, effective_end_date, sys_create_date, sys_end_date,
+		'N' AS [sys_deleted_ind]
+FROM [Sandbox_PlaceIndex].[Processing_PlaceIndex].[Dwelling_List_Interim]
+WHERE scenario_no IN (SELECT id FROM @scenario_number WHERE id = 5)
+AND version_no = @version_number
+GROUP BY dwelling_id, scenario_no, version_no, part_of_building_id, 
+		effective_start_date, effective_end_date, sys_create_date, sys_end_date, sys_deleted_ind
+
 
 
 
@@ -304,6 +314,7 @@ AND (dwell_reg.sys_end_date IS NULL OR dwell_reg.sys_end_date > '4999-01-01')
 	Find Part of Building-Dwelling UPDATEs
 	Will be used to update both Part of Building-Dwelling and Building-Dwelling tables as needed.
 	Separate from Dwelling-only changes, as the dwelling (and its relevant dates) could stay the same.
+	There should only be records here if methodology changes, not source data, as the dwelling and effective dates are otherwise the same.
 ------------------------------------------------------------------------------------------------------------------------------------------------ */
 
 IF OBJECT_ID('tempdb..#PoB_Updates') IS NOT NULL
@@ -361,18 +372,22 @@ AND (dbr.sys_end_date IS NULL OR dbr.sys_end_date > '4999-01-01')
 SELECT COUNT(*) AS total_considered_records FROM #temp_dwell
 
 
-SELECT COUNT(*) AS dwell_deletes, change FROM #dwell_deletes
-group by change order by change
+SELECT COUNT(*) AS dwell_deletes, change --top 1000 *
+FROM #dwell_deletes
+GROUP BY change ORDER BY change
 --ORDER BY dwelling_id, building_id, scenario_no, effective_start_date
 
-SELECT COUNT(*) AS dwell_inserts, change FROM #dwell_inserts
-group by change order by change
+SELECT COUNT(*) AS dwell_inserts, change --top 1000 *
+FROM #dwell_inserts
+GROUP BY change ORDER BY change
 --ORDER BY dwelling_id, building_id, scenario_no, effective_start_date
 
-SELECT COUNT(*) AS PoB_changes FROM #PoB_Updates
+SELECT COUNT(*) AS PoB_changes --top 1000 *
+FROM #PoB_Updates
 --ORDER BY dwelling_id, effective_start_date, building_id, part_of_building_id, old_pob_id
 
 
+-- Useful for testing maintenance
 --select count(*) AS dwell_deletes_maintenance, change, effective_end_date 
 --from (select --case when effective_start_date > '2024-06-07' then effective_start_date
 --				--	else '2024-05-24' end as changed_start_date, 
@@ -396,7 +411,7 @@ GO
 BEGIN TRAN;
 
 /* ------------------------------------------------------------------------------------------------------------------------------------------------
-	TEST SECTION
+	DEBUG
 ------------------------------------------------------------------------------------------------------------------------------------------------ */
 -- Get an idea of the total counts of tables before the operations on them happen
 --SELECT COUNT(*) AS dwell_reg, sys_end_date
@@ -741,7 +756,7 @@ GO
 
 
 /* ------------------------------------------------------------------------------------------------------------------------------------------------
-	TEST SECTION
+	DEBUG
 ------------------------------------------------------------------------------------------------------------------------------------------------ */
 -- Get an idea of the total counts of tables after the operations on them happen
 --SELECT COUNT(*) AS dwell_reg, sys_end_date
@@ -761,39 +776,6 @@ GO
 SELECT * FROM [Sandbox_PlaceIndex].[Processing_PlaceIndex].[Table_Changelog]
 WHERE change_date > DATEADD(HOUR, -2, GETDATE());
 GO
-
-/* Commit the whole set of inserts and updates at once */
--- Complete the transaction
-IF @@TRANCOUNT > 0
-    COMMIT TRAN;
-	
-	/* ------------------------------------------------------------------------------------------------------------------------------------------------
-		TEST SECTION - comment out the above COMMIT statement and uncomment the below lines
-	------------------------------------------------------------------------------------------------------------------------------------------------ */
-	--print 'completed'
-	--ROLLBACK TRAN; -- This should be in any TRY...CATCH statements
-GO
-
-
-
-
-/* ----------------------------------------------------------------------------------------------------------------------------------------------
-	CLEAN UP - drop the temporary tables from memory
-   --------------------------------------------------------------------------------------------------------------------------------------------*/
-IF OBJECT_ID('tempdb..#temp_dwell') IS NOT NULL
-    DROP TABLE #temp_dwell
-
-IF OBJECT_ID('tempdb..#dwell_deletes') IS NOT NULL
-    DROP TABLE #dwell_deletes
-
-IF OBJECT_ID('tempdb..#dwell_inserts') IS NOT NULL
-    DROP TABLE #dwell_inserts
-
-IF OBJECT_ID('tempdb..#PoB_Updates') IS NOT NULL
-    DROP TABLE #PoB_Updates
-
-
-
 
 
 /* ----------------------------------------------------------------------------------------------------------------------------------------------
@@ -818,3 +800,37 @@ SELECT TOP (1000) *
   order by dwelling_id, effective_start_date, sys_create_date
 
 */
+
+
+
+/* Commit the whole set of inserts and updates at once */
+-- Complete the transaction
+IF @@TRANCOUNT > 0
+	/* ------------------------------------------------------------------------------------------------------------------------------------------------
+		TEST SECTION - uncomment the COMMIT statement and comment out the ROLLBACK statement below.
+		DEBUG - comment out the COMMIT statement and uncomment the ROLLBACK statement below.
+		TO RUN: uncomment the COMMIT statement and comment out the ROLLBACK statement.
+	------------------------------------------------------------------------------------------------------------------------------------------------ */
+	print 'completed'
+
+	--COMMIT TRAN;
+	ROLLBACK TRAN; -- This should be in any TRY...CATCH statements (THROW; does the same job and also sends an error message)
+GO
+
+
+
+
+/* ----------------------------------------------------------------------------------------------------------------------------------------------
+	CLEAN UP - drop the temporary tables from memory
+   --------------------------------------------------------------------------------------------------------------------------------------------*/
+IF OBJECT_ID('tempdb..#temp_dwell') IS NOT NULL
+    DROP TABLE #temp_dwell
+
+IF OBJECT_ID('tempdb..#dwell_deletes') IS NOT NULL
+    DROP TABLE #dwell_deletes
+
+IF OBJECT_ID('tempdb..#dwell_inserts') IS NOT NULL
+    DROP TABLE #dwell_inserts
+
+IF OBJECT_ID('tempdb..#PoB_Updates') IS NOT NULL
+    DROP TABLE #PoB_Updates
